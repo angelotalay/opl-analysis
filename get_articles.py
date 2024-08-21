@@ -1,64 +1,78 @@
-import sh
-
+import glob
+import re
 import pandas as pd
+import os
+from tqdm import tqdm
 
-import ast
+FILE_PATH_PATTERN = "../data/pubmed_data/*.xml"
+COLUMNS = ["open_problem_title", "pmid", "article_title", "article_abstract"]
+OUTPUT_CSV_PATH = "../data/final_articles.csv"
 
-searched_articles = pd.read_csv("../data/title_keywords.csv", skiprows=1)
+
+def extract_articles(path: str) -> list:
+    with open(path, mode="r") as file:
+        articles = file.readlines()
+    return articles
 
 
-def construct_query(keywords, use_all=True):
-    """Constructs a query string from the given keywords and MeSH term."""
-    ageing_query = "(Ageing[MeSH Terms])"
-    if use_all and len(keywords) > 1:
-        extracted_keywords = [f"({keyword[0]})" for keyword in keywords[:2] if
-                              isinstance(keyword, tuple) and len(keyword) > 0]
-        keyword_query = " AND ".join(extracted_keywords)
+def match_to_open_problem(path: str, article_dataframe) -> str:
+    # Regex pattern to extract digits
+    pattern = r'op_(\d+)_articles\.xml'
+
+    # Search for the pattern in the file path
+    match = re.search(pattern, path)
+
+    if match:
+        # Extract the digits
+        digits = match.group(1)
+        index = int(digits) - 1
+        open_problem = article_dataframe.iloc[index, :]
+        title = open_problem["titles"]
+        return title
     else:
-        if isinstance(keywords[0], tuple) and len(keywords[0]) > 0:
-            keyword_query = f"({keywords[0][0]})"
-        else:
-            keyword_query = "(Ageing)"  # Fallback in case the keyword structure is incorrect
-
-    return f"{keyword_query} AND {ageing_query}"
+        raise ValueError("File path does not match the expected pattern")
 
 
-def perform_search(query, output_path):
-    # Run the command using sh
-    sh.esearch("-db", "pubmed", "-query", query, _piped=True) | \
-    sh.efetch("-format", "xml", _piped=True) | \
-    sh.xtract("-pattern", "PubmedArticle", "-element", "MedlineCitation/PMID,ArticleTitle,AbstractText",
-              _out=output_path)
+def get_article_data(title, article_array: list) -> pd.DataFrame:
+    # Each item in the array is an article
+    data = {
+        "open_problem_title": [title] * len(article_array),
+        "pmid": [],
+        "article_title": [],
+        "article_abstract": [],
+    }
+    for article in article_array:
+        components = article.split("\t")
+        pmid = components[0]
+        article_title = components[1]
+        data["pmid"].append(pmid)
+        data["article_title"].append(article_title)
+        abstract = components[2] if len(components) > 2 else ""
+        data["article_abstract"].append(abstract)
+
+    return pd.DataFrame(data)
 
 
-def search_pubmed(title, keywords, backup_keywords):
-    """Searches PubMed with the given title and keywords, and uses backup keywords if necessary."""
-    record_dict = {}
-
-    # Use backup keywords if the initial keywords are empty
-    if not keywords:
-        keywords = backup_keywords
-
-    keywords = ast.literal_eval(keywords)
-
-    # Construct and perform the initial query with two keywords
-    query = construct_query(keywords, use_all=True)
-    record = perform_search(query, output_path="../data/pubmed_data")
-
-    # Check if results are found, if not, retry with only the first keyword
-    if record["Count"] == "0":
-        query = construct_query(keywords, use_all=False)
-        record = perform_search(query)
-
-    # Store the results in a dictionary
-    record_dict["counts"] = record["Count"]
-    record_dict["ids"] = record["IdList"]
-    record_dict["query"] = query
-
-    return record_dict
+def create_dataframe(columns: list) -> pd.DataFrame:
+    dataframe = pd.DataFrame(columns=columns)
+    return dataframe
 
 
-first_ten_open_problems = searched_articles.head(10)
+def iterate(articles_dataframe, output_dataframe) -> pd.DataFrame:
+    for file_path in tqdm(glob.glob(FILE_PATH_PATTERN)):
+        content = extract_articles(file_path)
+        open_problem_title = match_to_open_problem(file_path, articles_dataframe)
+        data_df = get_article_data(open_problem_title, content)
+        output_dataframe = pd.concat([output_dataframe, data_df], ignore_index=True)
 
-for index, row in first_ten_open_problems.iterrows():
-    ...
+    return output_dataframe
+
+
+if __name__ == "__main__":
+    searched_articles = pd.read_json("../data/article_ids.json")
+    final_dataframe = create_dataframe(columns=COLUMNS)
+    final_dataframe = iterate(searched_articles, final_dataframe)
+
+    # Save the final dataframe to a CSV file
+    final_dataframe.to_csv(OUTPUT_CSV_PATH, index=False)
+    print(f"Data successfully saved to {OUTPUT_CSV_PATH}")
